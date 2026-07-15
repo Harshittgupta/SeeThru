@@ -1,0 +1,27 @@
+# SEETHRU - Backend API image
+# FastAPI app served with uvicorn.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System dependencies required by OpenCV (cv2):
+#   libgl1        -> provides libGL.so.1 for cv2 image operations
+#   libglib2.0-0  -> provides libgthread / glib runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies first to leverage Docker layer caching.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the project.
+COPY . .
+
+# FastAPI/uvicorn listens on port 8000.
+EXPOSE 8000
+
+# Default production command (compose overrides with --reload for dev).
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# SEETHRU - .gitignore (Python + Node.js monorepo)
+# ---------------------------------------------------------------------------
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+.venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp.*
+dist/
+build/
+coverage/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ML artifacts & data
+# Large media and model artifacts should NOT be committed to the repo.
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.h5
+*.mp4
+*.avi
+data/raw/
+data/processed/
+data/datasets/
+data/dummy/
+models/checkpoints/
+checkpoints/

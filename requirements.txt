@@ -1,0 +1,22 @@
+# SEETHRU - Python dependencies
+
+# Deep learning
+torch
+torchvision
+grad-cam
+
+# Web / API
+fastapi
+uvicorn
+
+# Computer vision
+opencv-python
+pillow
+albumentations==1.4.3
+retina-face
+tf-keras  # Keras-2 shim required by retina-face on TensorFlow 2.16+
+
+# Utilities
+numpy
+scipy
+matplotlib==3.8.0

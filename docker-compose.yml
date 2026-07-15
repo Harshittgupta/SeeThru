@@ -1,0 +1,47 @@
+# SEETHRU - Deepfake Detection System
+# Docker Compose configuration for local development.
+# Defines two services: the FastAPI backend (API) and the ML worker.
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------------
+  # Backend API service
+  # Serves the FastAPI app (deepfake detection endpoints) via uvicorn.
+  # Runs with --reload for live code reloading during development.
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: seethru-backend
+    ports:
+      # Map host port 8000 -> container port 8000 (FastAPI/uvicorn).
+      - "8000:8000"
+    volumes:
+      # Mount source for live development; changes are picked up by --reload.
+      - ./backend:/app/backend
+      - ./ml:/app/ml
+    environment:
+      # Ensure Python stdout/stderr is unbuffered so logs stream in real time.
+      - PYTHONUNBUFFERED=1
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ---------------------------------------------------------------------------
+  # ML service
+  # Long-running container for training / inference / batch ML jobs.
+  # By default it stays alive so you can exec in and run jobs manually.
+  # ---------------------------------------------------------------------------
+  ml:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    container_name: seethru-ml
+    volumes:
+      # Mount ML code and datasets for development and training.
+      - ./ml:/app/ml
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Keep the container alive. This is where training/inference jobs run:
+    # e.g. `docker compose exec ml python ml/train.py`.
+    command: tail -f /dev/null
