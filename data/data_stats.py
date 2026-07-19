@@ -13,25 +13,33 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict
 
-from dataset_manager import (
-    CLASS_TO_LABEL,
-    LABEL_TO_CLASS,
-    DeepfakeDataset,
-    default_identity_fn,
-)
+# Support `python data/data_stats.py`, `python -m data.data_stats`, and import
+# from tests. The bare `from dataset_manager import ...` only resolved because
+# sys.path[0] happens to be data/ when run as a script.
+try:
+    from .dataset_manager import (
+        CLASS_TO_LABEL,
+        IMAGE_EXTENSIONS,
+        DeepfakeDataset,
+        default_identity_fn,
+    )
+except ImportError:  # pragma: no cover - direct-script execution
+    from dataset_manager import (
+        CLASS_TO_LABEL,
+        IMAGE_EXTENSIONS,
+        DeepfakeDataset,
+        default_identity_fn,
+    )
 
 
 def _pct(part: int, whole: int) -> str:
     return f"{(100.0 * part / whole):.1f}%" if whole else "0.0%"
 
 
-def raw_class_distribution(root: Path) -> Dict[str, int]:
+def raw_class_distribution(root: Path) -> dict[str, int]:
     """Count images on disk per class, before any balancing or splitting."""
-    from dataset_manager import IMAGE_EXTENSIONS
-
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for class_name in CLASS_TO_LABEL:
         class_dir = root / class_name
         if not class_dir.is_dir():
@@ -68,8 +76,6 @@ def print_report(
         return
 
     # --- Identity counts --------------------------------------------------
-    from dataset_manager import IMAGE_EXTENSIONS
-
     identities = set()
     for class_name in CLASS_TO_LABEL:
         class_dir = root / class_name
@@ -88,15 +94,32 @@ def print_report(
     print(header)
     print("  " + "-" * (len(header) - 2))
 
+    # Build each split once and reuse -- the previous version constructed every
+    # split twice (once for sizes, once for the separation check), doubling a
+    # full disk scan for no reason.
+    datasets: dict[str, DeepfakeDataset] = {}
+    failures: dict[str, str] = {}
+    for split in ("train", "val", "test"):
+        try:
+            datasets[split] = DeepfakeDataset(
+                root,
+                split=split,
+                split_ratios=split_ratios,
+                balance=balance,
+                seed=seed,
+            )
+        except ValueError as exc:
+            # DeepfakeDataset now raises on a degenerate/empty split (T11).
+            # This is a *reporter*: surface the problem legibly rather than
+            # dying with a traceback, which is the whole point of running it.
+            failures[split] = str(exc).splitlines()[0]
+
     grand_total = 0
     for split in ("train", "val", "test"):
-        ds = DeepfakeDataset(
-            root,
-            split=split,
-            split_ratios=split_ratios,
-            balance=balance,
-            seed=seed,
-        )
+        if split in failures:
+            print(f"  {split:<7}{'FAILED':>8}{'-':>8}{'-':>8}{'-':>7}")
+            continue
+        ds = datasets[split]
         counts = ds.class_counts()
         n = len(ds)
         grand_total += n
@@ -109,16 +132,30 @@ def print_report(
     print(f"  {'total':<7}{grand_total:>8}")
 
     # --- Identity-separation sanity check ---------------------------------
-    split_ids = {}
-    for split in ("train", "val", "test"):
-        ds = DeepfakeDataset(
-            root,
-            split=split,
-            split_ratios=split_ratios,
-            balance=balance,
-            seed=seed,
-        )
-        split_ids[split] = set(ds.identities())
+    #
+    # This check used to be VACUOUS, and it mattered. With a broken identity_fn
+    # every image collapsed to one identity, val/test came back EMPTY, and the
+    # pairwise intersections were all empty-vs-empty -- so it cheerfully printed
+    # "OK - no identity appears in more than one split" over a completely broken
+    # split. A leak check without a non-empty check is a false green, and a false
+    # green is worse than no check: it actively tells you to stop looking.
+    print("\nIdentity separation check:")
+
+    if failures:
+        for split, message in failures.items():
+            print(f"  FAIL: split '{split}' could not be built -- {message}")
+        print("  Separation is UNVERIFIED: fix the above before trusting any metric.")
+        print()
+        return
+
+    split_ids = {name: set(ds.identities()) for name, ds in datasets.items()}
+
+    empty = [name for name, ids in split_ids.items() if not ids]
+    if empty:
+        print(f"  FAIL: split(s) {empty} contain ZERO identities.")
+        print("  Separation is UNVERIFIED (empty sets trivially do not overlap).")
+        print()
+        return
 
     overlaps = []
     splits = ("train", "val", "test")
@@ -126,14 +163,17 @@ def print_report(
         for j in range(i + 1, len(splits)):
             shared = split_ids[splits[i]] & split_ids[splits[j]]
             if shared:
-                overlaps.append((splits[i], splits[j], len(shared)))
+                overlaps.append((splits[i], splits[j], sorted(shared)))
 
-    print("\nIdentity separation check:")
     if overlaps:
-        for a, b, n in overlaps:
-            print(f"  WARNING: {n} identities shared between {a} and {b}")
+        for a, b, shared in overlaps:
+            print(f"  WARNING: {len(shared)} identities shared between {a} and {b}")
+            print(f"           e.g. {shared[:5]}")
     else:
-        print("  OK — no identity appears in more than one split.")
+        total_ids = sum(len(ids) for ids in split_ids.values())
+        sizes = ", ".join(f"{name}={len(ids)}" for name, ids in split_ids.items())
+        # State the evidence, not just the verdict, so "OK" is falsifiable.
+        print(f"  OK — {total_ids} identities ({sizes}), none shared across splits.")
     print()
 
 

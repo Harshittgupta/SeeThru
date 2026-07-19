@@ -21,20 +21,37 @@ FREQUENCY_FEATURES = 128
 def log_magnitude_spectrum(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """Centered log-magnitude Fourier spectrum of an image batch.
 
+    **Always computed in fp32, explicitly** (BUILD_PLAN T30).
+
+    ``log(|fft| + 1e-8)`` is an exponent-range hazard. fp16 spans roughly 6e-5 to
+    65504, so a small magnitude underflows to zero and the log goes to
+    ``log(1e-8) ~ -18.4`` -- or, if eps ever underflowed too, to ``-inf``, which
+    poisons the whole branch with NaN on the backward pass. bf16 keeps fp32's
+    exponent range but has ~3 decimal digits of mantissa, which is not enough for
+    a spectrum spanning many orders of magnitude.
+
+    torch's autocast already lists ``fft2`` as fp32-only, so this is currently
+    belt-and-braces -- but depending on an implicit allowlist for a numerical
+    hazard is exactly how something breaks silently three torch versions from now.
+    The disable is explicit so the guarantee is ours, not inherited.
+
     Args:
         x: ``(B, C, H, W)`` image tensor (any device; the transform runs on it).
         eps: Stabilizer so ``log`` stays finite at zero magnitude.
 
     Returns:
-        ``(B, C, H, W)`` real tensor. Fully differentiable — ``torch.fft.fft2``
+        ``(B, C, H, W)`` real fp32 tensor. Fully differentiable — ``torch.fft.fft2``
         and the elementwise ops all support autograd, and everything stays on
         the input's device (CPU or GPU).
     """
-    # 2D FFT over the spatial dims; low frequencies shifted to the centre.
-    freq = torch.fft.fft2(x, dim=(-2, -1))
-    freq = torch.fft.fftshift(freq, dim=(-2, -1))
-    magnitude = torch.abs(freq)
-    return torch.log(magnitude + eps)
+    # device_type must match the tensor's; autocast is per-device-type.
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        x = x.float()
+        # 2D FFT over the spatial dims; low frequencies shifted to the centre.
+        freq = torch.fft.fft2(x, dim=(-2, -1))
+        freq = torch.fft.fftshift(freq, dim=(-2, -1))
+        magnitude = torch.abs(freq)
+        return torch.log(magnitude + eps)
 
 
 class FrequencyBranch(nn.Module):

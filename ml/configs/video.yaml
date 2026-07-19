@@ -1,0 +1,63 @@
+# SEETHRU - stage 2: video model (BUILD_PLAN T33/T75).
+#
+#   python ml/train.py --config ml/configs/video.yaml --init-from runs/image/best.pt
+#
+# --init-from is not optional in practice. VideoClassifier subclasses
+# DeepfakeClassifier, so spatial/frequency/fusion/classifier share module paths
+# exactly and stage 1's weights transfer wholesale; only temporal.* is new.
+# ml/checkpoint.py::transfer_image_to_video RAISES unless exactly temporal.* is
+# missing -- without that assert, a renamed module makes strict=False match
+# nothing and this trains from scratch while reporting success.
+
+data:
+  # Processed 16-frame sequences from T69 (prepare_datasets.py).
+  root: data/processed
+  split_ratios: [0.7, 0.15, 0.15]
+  image_size: 224
+  n_frames: 16              # spec
+  balance: false
+  class_weighted_loss: true
+  # 2, not 4: on Windows spawn each worker re-imports and re-materialises, and
+  # clips are ~2.4 MB each.
+  num_workers: 2
+  drop_last: true
+
+model:
+  arch: video
+  fusion: concat            # same as stage 1 -- transfer requires it to match
+  dropout: 0.4
+  pretrained: true          # overridden by --init-from anyway
+
+optim:
+  lr: 0.0001
+  weight_decay: 0.0001
+  backbone_lr: 0.00001
+  warmup_epochs: 1
+  clip_grad_norm: 1.0
+  # Stage-1 fusion never saw real temporal features (they were zeros), so MLP
+  # input dims 1664:2176 have never received a gradient. Feeding real 512-dim
+  # temporal features there shifts the fused distribution hard. Freeze
+  # spatial+frequency for the first epochs and let temporal+fusion+head settle
+  # into the new distribution first.
+  freeze_backbone_epochs: 2
+  label_smoothing: 0.05
+
+train:
+  epochs: 15
+  # 2, NOT 16. VideoClassifier flattens (B,T) into the backbone, so B=8,T=16
+  # pushes 128 images through EfficientNet-B3 per step -- measured at ~19.3 GB of
+  # fp32 activations for the spatial branch ALONE, before the frequency branch,
+  # gradients and optimizer state. Raise only if nvidia-smi says you can.
+  batch_size: 2
+  accum_steps: 8            # -> effective batch 16
+  amp: true
+  amp_dtype: auto
+  patience: 5
+  monitor: val_loss
+  restore_best: true
+  seed: 42
+  channels_last: true
+  compile: false
+  device: auto
+  name: video
+  out_dir: runs

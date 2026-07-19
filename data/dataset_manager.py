@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from PIL import Image
@@ -48,22 +48,45 @@ LABEL_TO_CLASS = {v: k for k, v in CLASS_TO_LABEL.items()}
 
 VALID_SPLITS = ("train", "val", "test", "all")
 
+# A split needs at least one identity in each of train/val/test.
+MIN_IDENTITIES = 3
+
+# Below this many samples, "one identity per file" is plausible rather than a
+# symptom of a broken identity_fn, so we don't flag it.
+_EXPLOSION_CHECK_MIN_SAMPLES = 10
+
+# Matches an explicit trailing frame index: "_frame_001", "-frame-7", "_frame7".
+_FRAME_SUFFIX_RE = re.compile(r"[_-]frame[_-]?\d+$", re.IGNORECASE)
+
 
 def default_identity_fn(path: Path) -> str:
-    """Derive a subject/identity id from an image file path.
+    """Derive a subject id from a filename with simple ``<identity>[_frame_<n>]`` naming.
 
-    Many deepfake datasets encode the subject in the filename (e.g.
-    ``id3_id5_0001.png`` in Celeb-DF, or ``033_097.png`` in FaceForensics++).
-    The default heuristic takes the leading token before the first separator
-    (``_`` or ``-``); if no separator is present the full stem is used.
+    Strips an explicit trailing frame index and returns the rest of the stem::
 
-    Override this with the ``identity_fn`` constructor argument to match your
-    dataset's naming convention.
+        person_001_frame_001.jpg  ->  person_001
+        person_001.mp4            ->  person_001   (a subject's video and its
+                                                    frames map to the same id)
+
+    **This heuristic cannot handle the real datasets, and does not try to.**
+    FaceForensics++ and Celeb-DF encode *two* identities in every fake filename
+    (``033_097`` = target 033 with source 097's face swapped in; ``id3_id5_0001``
+    likewise). Grouping on either id alone leaks the other across splits -- the
+    trap that BUILD_PLAN T15 exists to close. Use the dataset-specific functions
+    for those, or better, FF++'s official ``splits/*.json``.
+
+    A previous version of this function took the leading alphanumeric run
+    (``^([A-Za-z0-9]+)``), which mapped every ``person_XXX_frame_YYY`` to the
+    single identity ``"person"``. With one identity, ``round(0.15 * 1) == 0``, so
+    val and test came back **empty with no error raised**. Wrong guesses are now
+    caught at construction by :meth:`DeepfakeDataset._validate_identities`
+    instead of being silently tolerated.
     """
     stem = path.stem
-    match = re.match(r"^([A-Za-z0-9]+)", stem)
-    token = match.group(1) if match else stem
-    return token
+    stripped = _FRAME_SUFFIX_RE.sub("", stem)
+    # Never return "" -- a file literally named "frame_001.jpg" would otherwise
+    # produce an empty identity that silently groups with every other such file.
+    return stripped or stem
 
 
 class DeepfakeDataset(Dataset):
@@ -84,18 +107,23 @@ class DeepfakeDataset(Dataset):
             used for identity-separated splitting. Defaults to
             :func:`default_identity_fn`.
         seed: Seed controlling the (deterministic) identity split and balancing.
+        validate_identities: If ``True`` (default), raise when ``identity_fn``
+            has obviously misfired -- see :meth:`_validate_identities`. Set
+            ``False`` only if your dataset genuinely has one image per subject,
+            which makes the "explosion" check a false positive.
     """
 
     def __init__(
         self,
         root: str | Path,
         split: str = "train",
-        split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
+        split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
         balance: bool = True,
         image_size: int = 224,
-        transform: Optional[Callable] = None,
-        identity_fn: Optional[Callable[[Path], str]] = None,
+        transform: Callable | None = None,
+        identity_fn: Callable[[Path], str] | None = None,
         seed: int = 42,
+        validate_identities: bool = True,
     ) -> None:
         if split not in VALID_SPLITS:
             raise ValueError(f"split must be one of {VALID_SPLITS}, got {split!r}")
@@ -120,6 +148,11 @@ class DeepfakeDataset(Dataset):
                 f"No images found under {self.root}/real and {self.root}/fake"
             )
 
+        # Catch a broken identity_fn BEFORE splitting. Both failure directions
+        # are silent if unchecked, and both invalidate every downstream metric.
+        if validate_identities:
+            self._validate_identities(all_samples)
+
         # Assign identities to splits, then keep only samples for this split.
         if split == "all":
             split_samples = all_samples
@@ -128,13 +161,14 @@ class DeepfakeDataset(Dataset):
             split_samples = [
                 s for s in all_samples if identity_to_split[s[2]] == split
             ]
+            self._require_non_empty_split(split_samples, all_samples)
 
         # Enforce 50:50 class balance within the split.
         if self.balance:
             split_samples = self._balance_classes(split_samples)
 
         # Final ordering is deterministic (sorted by path) for reproducibility.
-        self.samples: List[Tuple[Path, int, str]] = sorted(
+        self.samples: list[tuple[Path, int, str]] = sorted(
             split_samples, key=lambda s: str(s[0])
         )
 
@@ -144,24 +178,46 @@ class DeepfakeDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
+        """Return ``(tensor, label)``.
+
+        Kept as a plain tuple: this is the conventional torchvision contract and
+        every training loop expects to unpack two values. Per-sample metadata
+        (identity, path) is available via :meth:`metadata` or ``self.samples``,
+        which is enough for the metrics that need it -- unlike the video dataset,
+        the image set has no ``manipulation`` field to lose (T19).
+        """
         path, label, _identity = self.samples[index]
         with Image.open(path) as img:
             image = img.convert("RGB")
             tensor = self.transform(image)
         return tensor, label
 
+    def metadata(self, index: int) -> dict[str, object]:
+        """Per-sample metadata for the sample at ``index``.
+
+        Lets an evaluation loop group predictions by identity without paying to
+        decode the image, and without changing __getitem__'s tuple contract.
+        """
+        path, label, identity = self.samples[index]
+        return {
+            "path": str(path),
+            "label": label,
+            "identity": identity,
+            "class_name": LABEL_TO_CLASS[label],
+        }
+
     # ------------------------------------------------------------------ #
     # Public helpers
     # ------------------------------------------------------------------ #
-    def class_counts(self) -> Dict[str, int]:
+    def class_counts(self) -> dict[str, int]:
         """Return the number of samples per class in this split."""
         counts = {name: 0 for name in CLASS_TO_LABEL}
         for _path, label, _identity in self.samples:
             counts[LABEL_TO_CLASS[label]] += 1
         return counts
 
-    def identities(self) -> List[str]:
+    def identities(self) -> list[str]:
         """Return the sorted unique identities present in this split."""
         return sorted({identity for _p, _l, identity in self.samples})
 
@@ -178,9 +234,87 @@ class DeepfakeDataset(Dataset):
             ]
         )
 
-    def _scan_samples(self) -> List[Tuple[Path, int, str]]:
+    def _validate_identities(self, samples: Sequence[tuple[Path, int, str]]) -> None:
+        """Fail loudly when ``identity_fn`` has obviously misfired.
+
+        Identity-separated splitting has two silent failure modes, and both
+        produce a dataset that looks fine and reports numbers that are fiction:
+
+        * **Collapse** -- every file maps to the same id. There is 1 identity,
+          ``round(0.15 * 1) == 0``, and val/test are empty. Nothing raises, so
+          early stopping on val loss never fires and you find out at write-up.
+        * **Explosion** -- every file maps to a *unique* id. "Identity-separated"
+          silently degenerates into a random per-sample split, the same subject
+          lands in train and test, and metrics inflate.
+
+        Neither is detectable from ``len(dataset)`` alone, which is why this runs
+        at construction rather than being left to the caller.
+        """
+        identities = {identity for _p, _l, identity in samples}
+        n_ids = len(identities)
+        n_samples = len(samples)
+
+        def _example_mapping(limit: int = 3) -> str:
+            rows = [f"{p.name!r} -> {identity!r}" for p, _l, identity in samples[:limit]]
+            return "; ".join(rows)
+
+        if n_ids < MIN_IDENTITIES:
+            raise ValueError(
+                f"identity_fn produced only {n_ids} distinct "
+                f"{'identity' if n_ids == 1 else 'identities'} across {n_samples} "
+                f"samples under {self.root}, but at least {MIN_IDENTITIES} are "
+                f"needed to fill train/val/test.\n"
+                f"  Got: {sorted(identities)[:5]}\n"
+                f"  Example mapping: {_example_mapping()}\n"
+                f"  This collapses the split: val/test would be EMPTY.\n"
+                f"  Fix the filenames, or pass an identity_fn matching your "
+                f"dataset's naming."
+            )
+
+        if n_samples >= _EXPLOSION_CHECK_MIN_SAMPLES and n_ids == n_samples:
+            raise ValueError(
+                f"identity_fn produced a unique identity for every one of the "
+                f"{n_samples} samples under {self.root}, so nothing is grouped "
+                f"and the identity split degenerates into a random one -- frames "
+                f"of the same subject will land in both train and test.\n"
+                f"  Example mapping: {_example_mapping()}\n"
+                f"  Pass an identity_fn that extracts the SUBJECT from the "
+                f"filename, not the file's own name.\n"
+                f"  (If your dataset genuinely has exactly one image per subject, "
+                f"this warning is a false positive -- identity splitting is then "
+                f"equivalent to random splitting and is harmless. Pass "
+                f"validate_identities=False to proceed.)"
+            )
+
+    def _require_non_empty_split(
+        self,
+        split_samples: Sequence[tuple[Path, int, str]],
+        all_samples: Sequence[tuple[Path, int, str]],
+    ) -> None:
+        """Refuse to hand back an empty split.
+
+        Returning ``len == 0`` here is the single most expensive failure mode in
+        this codebase: a DataLoader over an empty dataset yields no batches, the
+        val loop reports nothing, and training "succeeds" having never validated.
+        """
+        if split_samples:
+            return
+
+        n_ids = len({identity for _p, _l, identity in all_samples})
+        train_r, val_r, test_r = self.split_ratios
+        raise ValueError(
+            f"split {self.split!r} is empty: {n_ids} identities split by "
+            f"{self.split_ratios} leaves nothing for it "
+            f"(n_train={int(round(train_r * n_ids))}, "
+            f"n_val={int(round(val_r * n_ids))}, "
+            f"n_test={n_ids - int(round(train_r * n_ids)) - int(round(val_r * n_ids))} "
+            f"identities).\n"
+            f"  Either supply more identities, or widen split_ratios."
+        )
+
+    def _scan_samples(self) -> list[tuple[Path, int, str]]:
         """Walk ``real/`` and ``fake/`` and collect (path, label, identity)."""
-        samples: List[Tuple[Path, int, str]] = []
+        samples: list[tuple[Path, int, str]] = []
         for class_name, label in CLASS_TO_LABEL.items():
             class_dir = self.root / class_name
             if not class_dir.is_dir():
@@ -194,8 +328,8 @@ class DeepfakeDataset(Dataset):
         return samples
 
     def _assign_identity_splits(
-        self, samples: Sequence[Tuple[Path, int, str]]
-    ) -> Dict[str, str]:
+        self, samples: Sequence[tuple[Path, int, str]]
+    ) -> dict[str, str]:
         """Deterministically map each identity to a train/val/test split.
 
         Splitting is done at the identity level (not the sample level) so that
@@ -221,7 +355,7 @@ class DeepfakeDataset(Dataset):
         n_train = min(n_train, n)
         n_val = min(n_val, n - n_train)
 
-        assignment: Dict[str, str] = {}
+        assignment: dict[str, str] = {}
         for i, identity in enumerate(shuffled):
             if i < n_train:
                 assignment[identity] = "train"
@@ -232,10 +366,10 @@ class DeepfakeDataset(Dataset):
         return assignment
 
     def _balance_classes(
-        self, samples: Sequence[Tuple[Path, int, str]]
-    ) -> List[Tuple[Path, int, str]]:
+        self, samples: Sequence[tuple[Path, int, str]]
+    ) -> list[tuple[Path, int, str]]:
         """Downsample the majority class to enforce a 50:50 real/fake ratio."""
-        by_label: Dict[int, List[Tuple[Path, int, str]]] = defaultdict(list)
+        by_label: dict[int, list[tuple[Path, int, str]]] = defaultdict(list)
         for sample in samples:
             by_label[sample[1]].append(sample)
 
@@ -249,7 +383,7 @@ class DeepfakeDataset(Dataset):
         target = min(len(items) for items in by_label.values())
 
         generator = torch.Generator().manual_seed(self.seed)
-        balanced: List[Tuple[Path, int, str]] = []
+        balanced: list[tuple[Path, int, str]] = []
         for label in sorted(by_label):
             items = sorted(by_label[label], key=lambda s: str(s[0]))
             if len(items) > target:
@@ -262,9 +396,9 @@ class DeepfakeDataset(Dataset):
 
 def build_splits(
     root: str | Path,
-    split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
+    split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
     **kwargs,
-) -> Dict[str, DeepfakeDataset]:
+) -> dict[str, DeepfakeDataset]:
     """Convenience constructor returning the three identity-separated splits.
 
     Returns a dict ``{"train": ..., "val": ..., "test": ...}``.

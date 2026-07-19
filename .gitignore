@@ -41,16 +41,35 @@ Thumbs.db
 
 # ML artifacts & data
 # Large media and model artifacts should NOT be committed to the repo.
+#
+# This is also the EULA firewall (see NOTICE): FaceForensics++ and Celeb-DF are
+# obtained under signed research-only agreements that forbid redistribution, so
+# no dataset video, frame or face crop may EVER be committed here. Weights are a
+# derivative of that data and inherit the restriction.
 *.pth
 *.pt
 *.ckpt
 *.onnx
 *.h5
+*.safetensors
 *.mp4
 *.avi
+*.mov
+*.mkv
 data/raw/
 data/processed/
 data/datasets/
 data/dummy/
 models/checkpoints/
 checkpoints/
+
+# Training run artifacts. best.pt/last.pt are already covered by *.pt above, but
+# config.yaml, train.log and the TensorBoard event files under runs/*/tb/ are
+# not -- and event files grow without bound.
+runs/
+
+# Backend runtime state, created at startup: rendered explanation PNGs, the
+# job-queue SQLite database, and spooled uploads. Local state, never source --
+# and _tmp/ can briefly hold a user's uploaded media.
+backend/_artifacts/
+backend/_tmp/

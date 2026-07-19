@@ -1,0 +1,101 @@
+# SEETHRU - smoke test (BUILD_PLAN T34). THE most important config here.
+#
+#   python ml/train.py --config ml/configs/smoke.yaml --smoke
+#
+# Overfits ~10 samples on CPU in ~2 minutes and asserts the loss collapses. If
+# the model CANNOT memorise 10 samples, the training loop is broken -- and you
+# want to learn that here, now, for free, rather than at epoch 12 of a run you
+# queued for days on a shared college GPU.
+#
+# Every deviation from image.yaml below is deliberate:
+#
+#   train_transform is swapped for val_transform by --smoke. This is essential,
+#   not tidiness: image.yaml's augmentation (RandomCrop, Rotate, GaussNoise,
+#   blur, JPEG re-compression) makes 10 samples genuinely UNMEMORISABLE -- every
+#   epoch shows a different image. The test would fail with a perfectly correct
+#   loop.
+#
+#   pretrained: false     -> no 50MB download; the run stays offline and fast.
+#                            Random init can still memorise 10 samples easily.
+#   freeze_backbone_epochs: 0 -> a frozen backbone cannot memorise anything.
+#   amp: false            -> CPU has no autocast benefit, and fp32 keeps any NaN
+#                            attributable to the loop rather than to precision.
+#   accum_steps: 2        -> deliberately >1, so the smoke run exercises the
+#                            accumulation path. A bug there is otherwise invisible
+#                            until the real run.
+#   deterministic: true   -> failures are reproducible from the traceback alone.
+#   num_workers: 0        -> avoids Windows spawn overhead for a 2-minute run and
+#                            keeps tracebacks readable (worker tracebacks are not).
+#   drop_last: false      -> with 10 samples and batch 2, drop_last would silently
+#                            discard data. LayerNorm (T21) survives a batch of 1.
+
+data:
+  root: data/dummy/images
+  split_ratios: [0.7, 0.15, 0.15]
+  image_size: 224
+  balance: true             # tiny set: keep it exactly 5 real / 5 fake
+  class_weighted_loss: false
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  drop_last: false
+
+model:
+  arch: image
+  fusion: concat
+  dropout: 0.0              # dropout actively fights memorisation
+  pretrained: false
+
+optim:
+  lr: 0.001                 # 10x image.yaml: we WANT fast overfitting here
+  # MUST equal lr here. image.yaml uses backbone_lr=1e-5 to avoid washing out
+  # ImageNet features -- correct when fine-tuning, catastrophic from scratch.
+  # This config sets pretrained: false, so the backbone is random: there is
+  # nothing to protect, and 1e-5 merely stops 10.6M of the model's 12.0M
+  # parameters (88.9%) from learning at all. That is precisely what made this
+  # smoke test fail against a perfectly correct training loop -- the engine now
+  # warns when it sees this combination.
+  backbone_lr: 0.001
+  weight_decay: 0.0
+  warmup_epochs: 0
+  clip_grad_norm: 1.0
+  freeze_backbone_epochs: 0
+  label_smoothing: 0.0      # smoothing puts a floor under the loss
+
+train:
+  epochs: 50
+  # FULL BATCH: all 10 samples in one batch, one optimizer step per epoch.
+  # Every alternative was tried and measured, and each failed for a BatchNorm
+  # reason:
+  #
+  #   batch=2,  shuffle : oscillates violently (0.02 -> 1.36 -> 0.15 -> 0.53).
+  #                       EfficientNet's BatchNorms estimate statistics from 2
+  #                       samples, so the gradient itself is noise.
+  #   batch=5,  shuffle : train loss swings on batch COMPOSITION, not weights --
+  #                       measured 0.0045 -> 0.89 between epochs at lr=1e-6,
+  #                       where the weights physically cannot move.
+  #   batch=5,  no shuffle : WORSE, and quietly so. samples are path-sorted, so
+  #                       "fake/*" fills batch 1 and "real/*" batch 2 -- SINGLE
+  #                       CLASS batches. BatchNorm then leaks the label through
+  #                       the batch statistics: train loss falls while val AUC
+  #                       DROPS 1.00 -> 0.60. The model learns "batch stats ->
+  #                       answer" instead of features.
+  #   batch=10 (this)  : one partition, both classes, zero composition variance.
+  #
+  # accum_steps 1 follows: with a single batch there is nothing to accumulate.
+  # The accumulation path is covered properly by tests/unit/test_engine.py,
+  # which is faster and actually isolates it.
+  batch_size: 10
+  accum_steps: 1
+  amp: false
+  patience: 999             # never early-stop a smoke run
+  monitor: val_loss
+  restore_best: false
+  seed: 0
+  deterministic: true
+  channels_last: false
+  compile: false
+  device: cpu               # explicit: this must pass with no GPU at all
+  name: smoke
+  out_dir: runs
+  log_every: 10

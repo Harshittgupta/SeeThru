@@ -1,13 +1,48 @@
 # SEETHRU - Deepfake Detection System
 # Docker Compose configuration for local development.
-# Defines two services: the FastAPI backend (API) and the ML worker.
-version: "3.9"
+#
+# ---------------------------------------------------------------------------
+# STATUS: backend + frontend are live. The `ml` training service stays disabled
+# until it is useful (a GPU host, BUILD_PLAN T72) -- it references ml/train.py,
+# which exists, but running it on a CPU compose host is pointless.
+#
+# `docker compose up` brings up:
+#   frontend (nginx :5173) -> proxies /v1 -> backend (uvicorn :8000)
+#
+# Decisions already made here -- don't relitigate:
+#   * Backend runs `--workers 1` and WITHOUT `--reload` (BUILD_PLAN T57). The
+#     video job queue is in-process; a second worker cannot see a job submitted
+#     to the first (spurious 404s), and the reloader kills in-flight jobs.
+#   * The frontend proxies /v1 to the backend, so the app uses a relative
+#     baseURL and needs no build-time API env var (T65).
+#   * GPU access uses `deploy.resources.reservations.devices`, NOT
+#     `runtime: nvidia` -- the latter is legacy nvidia-docker2 and does not work
+#     on Docker Desktop / WSL2, which is what this project targets.
+# ---------------------------------------------------------------------------
 
 services:
   # ---------------------------------------------------------------------------
-  # Backend API service
+  # Frontend (BUILD_PLAN T65) -- nginx serving the built SPA, proxying /v1.
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: seethru-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Backend API service (BUILD_PLAN T54 -- ENABLED)
   # Serves the FastAPI app (deepfake detection endpoints) via uvicorn.
-  # Runs with --reload for live code reloading during development.
   # ---------------------------------------------------------------------------
   backend:
     build:
@@ -15,33 +50,72 @@ services:
       dockerfile: docker/Dockerfile.backend
     container_name: seethru-backend
     ports:
-      # Map host port 8000 -> container port 8000 (FastAPI/uvicorn).
       - "8000:8000"
     volumes:
-      # Mount source for live development; changes are picked up by --reload.
       - ./backend:/app/backend
       - ./ml:/app/ml
+      - ./data:/app/data
+      # Weights are mounted, never baked into the image (EULA firewall, T81).
+      - ./runs:/app/runs
     environment:
-      # Ensure Python stdout/stderr is unbuffered so logs stream in real time.
       - PYTHONUNBUFFERED=1
-    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+      # Point these at real checkpoints once training has run (T74/T75). Until
+      # then the API refuses to become ready -- an untrained head is confident
+      # noise. Set SEETHRU_ALLOW_UNTRAINED=true for a wiring-only local run.
+      - SEETHRU_IMAGE_WEIGHTS=/app/runs/image/best.pt
+      # - SEETHRU_VIDEO_WEIGHTS=/app/runs/video/best.pt
+      - SEETHRU_DEVICE=auto
+      # TensorFlow (via retina-face) otherwise preallocates all VRAM and starves
+      # PyTorch on the same card (BUILD_PLAN T45 removes TF entirely).
+      - TF_FORCE_GPU_ALLOW_GROWTH=true
+      - TF_CPP_MIN_LOG_LEVEL=2
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        # Docker's default is UNBOUNDED and will fill the disk.
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # /health must not touch the GPU, the model, or disk (BUILD_PLAN T54), so
+      # it is green during the slow model load and the orchestrator does not
+      # kill the container mid-startup.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    # --workers 1 and NO --reload are mandatory, not stylistic (BUILD_PLAN T57):
+    # the video job queue is in-process, so a second worker cannot see a job
+    # submitted to the first (spurious 404s), and the reloader kills in-flight
+    # jobs. Scale by adding GPUs + a shared queue, not by adding workers.
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers 1
 
   # ---------------------------------------------------------------------------
-  # ML service
+  # ML service -- ENABLE IN T32 (and only useful on a GPU host, T72)
   # Long-running container for training / inference / batch ML jobs.
-  # By default it stays alive so you can exec in and run jobs manually.
   # ---------------------------------------------------------------------------
-  ml:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.ml
-    container_name: seethru-ml
-    volumes:
-      # Mount ML code and datasets for development and training.
-      - ./ml:/app/ml
-      - ./data:/app/data
-    environment:
-      - PYTHONUNBUFFERED=1
-    # Keep the container alive. This is where training/inference jobs run:
-    # e.g. `docker compose exec ml python ml/train.py`.
-    command: tail -f /dev/null
+  # ml:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile.ml
+  #   container_name: seethru-ml
+  #   volumes:
+  #     - ./ml:/app/ml
+  #     - ./data:/app/data
+  #     - ./runs:/app/runs
+  #   environment:
+  #     - PYTHONUNBUFFERED=1
+  #     - TF_FORCE_GPU_ALLOW_GROWTH=true
+  #     - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+  #   # Keep the container alive; exec in to run jobs:
+  #   #   docker compose exec ml python ml/train.py --config ml/configs/image.yaml
+  #   command: tail -f /dev/null
+

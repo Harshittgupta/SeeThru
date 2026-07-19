@@ -16,7 +16,6 @@ Example::
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -45,7 +44,7 @@ class FaceDetector:
         self,
         output_size: int = DEFAULT_OUTPUT_SIZE,
         confidence_threshold: float = 0.9,
-        desired_left_eye: Tuple[float, float] = DEFAULT_LEFT_EYE,
+        desired_left_eye: tuple[float, float] = DEFAULT_LEFT_EYE,
     ) -> None:
         self.output_size = output_size
         self.confidence_threshold = confidence_threshold
@@ -56,7 +55,7 @@ class FaceDetector:
     # ------------------------------------------------------------------ #
     def detect_and_align(
         self, image: str | Path | np.ndarray
-    ) -> List[np.ndarray]:
+    ) -> list[np.ndarray]:
         """Detect, align and crop every face in an image.
 
         ``image`` may be a path to an image file or an already-loaded HWC BGR
@@ -78,11 +77,20 @@ class FaceDetector:
 
         # RetinaFace returns a dict {face_1: {...}, ...}; an empty tuple/dict
         # (or no detections) means no faces were found.
-        detections = RetinaFace.detect_faces(detect_input)
+        #
+        # threshold= must be passed through (T44). Without it RetinaFace applies
+        # its own internal default of 0.9, so the filter below could only ever
+        # TIGHTEN -- meaning FaceDetector(confidence_threshold=0.5) silently
+        # still yielded 0.9, and the constructor argument was a no-op for every
+        # value under 0.9. Lowering the threshold to recover faces from hard
+        # frames simply did nothing, with no error and no warning.
+        detections = RetinaFace.detect_faces(
+            detect_input, threshold=self.confidence_threshold
+        )
         if not isinstance(detections, dict) or not detections:
             return []
 
-        faces: List[np.ndarray] = []
+        faces: list[np.ndarray] = []
         for info in detections.values():
             if info.get("score", 1.0) < self.confidence_threshold:
                 continue
@@ -96,7 +104,7 @@ class FaceDetector:
     # ------------------------------------------------------------------ #
     def _align_face(
         self, image: np.ndarray, landmarks: dict
-    ) -> Optional[np.ndarray]:
+    ) -> np.ndarray | None:
         """Affine-align a single face so the eyes are level and a fixed size.
 
         Uses the two eye landmarks to compute the in-plane rotation and the

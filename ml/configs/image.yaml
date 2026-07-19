@@ -1,0 +1,53 @@
+# SEETHRU - stage 1: image model (BUILD_PLAN T32/T74).
+#
+# Trains spatial + frequency branches -> fusion -> head on single frames.
+# Stage 2 (video.yaml) then initialises from this run's best.pt (T33/T75).
+#
+#   python ml/train.py --config ml/configs/image.yaml
+#
+# Values follow the project spec; see ml/config.py for the rationale on each.
+
+data:
+  # Point this at the processed FF++ crops once T67-T69 have run. Until then the
+  # dummy set at least exercises the pipeline end to end.
+  root: data/dummy/images
+  split_ratios: [0.7, 0.15, 0.15]   # spec: validation split 15-20%
+  image_size: 224                    # spec
+  # Never downsample to balance: it discards 75% of FF++'s fakes (4 manipulation
+  # methods vs 1 real per identity). Weight the loss instead (T16).
+  balance: false
+  class_weighted_loss: true
+  num_workers: 4
+  drop_last: true
+
+model:
+  arch: image
+  fusion: concat        # docs/adr/0001-fusion-mode.md
+  dropout: 0.4          # spec: 0.3-0.5
+  pretrained: true      # ImageNet init for EfficientNet-B3
+
+optim:
+  lr: 0.0001            # spec
+  weight_decay: 0.0001  # spec
+  backbone_lr: 0.00001  # pretrained features need a much smaller step than the head
+  head_lr_frozen: 0.001
+  warmup_epochs: 1
+  clip_grad_norm: 1.0
+  freeze_backbone_epochs: 2
+  label_smoothing: 0.05
+
+train:
+  epochs: 20            # spec: 15-30
+  batch_size: 16        # spec: 8-16
+  accum_steps: 2        # -> effective batch 32
+  amp: true
+  amp_dtype: auto       # bf16 if the GPU supports it, else fp16+GradScaler
+  patience: 5           # spec
+  monitor: val_loss     # spec
+  restore_best: true    # spec
+  seed: 42
+  channels_last: true
+  compile: false        # Triton-on-Windows is fragile; measure before enabling
+  device: auto
+  name: image
+  out_dir: runs

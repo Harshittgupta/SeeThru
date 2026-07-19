@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.local
+.env
+
+# Emitted by `tsc -b`. tsconfig.node.json is a referenced project, so it cannot
+# set noEmit -- which means building generates a compiled vite.config.js/.d.ts
+# and incremental caches beside the TypeScript source. Build output, not source.
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

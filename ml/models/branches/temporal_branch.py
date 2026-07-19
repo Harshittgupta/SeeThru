@@ -11,8 +11,6 @@ Pipeline: ``(B, T, C)`` frame features → 2-layer bidirectional LSTM (hidden 25
 
 from __future__ import annotations
 
-from typing import Tuple
-
 import torch
 import torch.nn as nn
 
@@ -39,7 +37,7 @@ class TemporalAttention(nn.Module):
 
     def forward(
         self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Pool ``(B, T, F)`` to ``(B, F)``.
 
         Returns ``(pooled, weights)`` where ``weights`` is ``(B, T)`` and sums

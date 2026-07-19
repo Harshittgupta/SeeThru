@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
     print(model)
     print("-" * 60)
-    print(f"SpatialBranch (EfficientNet-B3)")
+    print("SpatialBranch (EfficientNet-B3)")
     print(f"  total parameters:     {n_params:,}")
     print(f"  trainable parameters: {trainable:,}")
     print(f"  output feature dim:   {model.out_features}")

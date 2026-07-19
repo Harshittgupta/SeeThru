@@ -1,0 +1,92 @@
+# SEETHRU - tooling configuration.
+#
+# Dependencies deliberately still live in requirements.txt, not here. Migrating
+# to a pyproject/uv-managed dependency tree is BUILD_PLAN T82's job, and doing it
+# now would mean resolving the torch CUDA-index problem before we even have a
+# GPU. This file configures pytest/ruff only.
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# -m 'not gpu' by default: CI runners have no GPU, and neither does this machine
+# until the college server lands (BUILD_PLAN T72). GPU tests are opt-in via
+# `pytest -m gpu`.
+addopts = [
+    "-m", "not gpu",
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+
+markers = [
+    "gpu: requires a CUDA device (deselected by default; run with `pytest -m gpu`)",
+    "slow: takes more than ~5 seconds",
+    "integration: exercises more than one component together",
+]
+
+filterwarnings = [
+    "default",
+    # TensorFlow (via retina-face) is noisy on import and we cannot fix it here.
+    # T45 removes TF entirely, at which point this can go.
+    "ignore::DeprecationWarning:tensorflow.*",
+    "ignore::DeprecationWarning:keras.*",
+    # Starlette is mid-rename of its HTTP status constants (422/413) and warns on
+    # both the old names and its own TestClient. Cosmetic; not our code to fix.
+    "ignore::DeprecationWarning:starlette.*",
+    "ignore:.*HTTP_42.*:DeprecationWarning",
+    "ignore:.*HTTP_413.*:DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["ml", "data", "backend"]
+omit = [
+    "*/__main__.py",
+    "*/create_dummy_dataset.py",  # a fixture generator, not shipped code
+]
+
+[tool.coverage.report]
+# 70%, not 90%. Most of this tree is nn.Module plumbing whose correctness is
+# proven by shape tests, not line coverage. Chasing 90% here buys theatre.
+fail_under = 70
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+extend-exclude = ["venv", "notebooks"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",  # line length -- the formatter owns this
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom IS a call in an argument default
+# (`= Depends(...)`, `= File(...)`). Not a bug; the framework's intended usage.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.File",
+    "fastapi.Form",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may shadow builtins and use asserts freely.
+"tests/*" = ["B011"]
+"backend/tests/*" = ["B011"]

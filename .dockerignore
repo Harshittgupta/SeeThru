@@ -1,0 +1,64 @@
+# Docker does NOT read .gitignore. Without this file, `COPY . .` in
+# docker/Dockerfile.backend and docker/Dockerfile.ml ships the ~2.6 GB venv and
+# the entire dataset into every image. See docs/BUILD_PLAN.md T5.
+
+# Virtualenvs (2.6 GB, and platform-specific -- never valid inside an image)
+venv/
+.venv/
+env/
+
+# Datasets and processed tensors. Also a licensing matter: FaceForensics++ and
+# Celeb-DF are research-only, no-redistribution EULAs, so their frames must
+# never end up inside a distributable image (BUILD_PLAN T7).
+data/
+!data/.gitkeep
+!data/*.py
+
+# Model weights are fetched at runtime, not baked in (BUILD_PLAN T81) -- baking
+# couples the model version to the image tag and redistributes EULA-derived work.
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+runs/
+models/
+
+# VCS / CI
+.git/
+.github/
+.gitignore
+
+# Python bytecode and caches
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Notebooks (experiment scratch, not runtime)
+notebooks/
+
+# Frontend build artifacts (the frontend has its own multi-stage build, T65)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docs are not needed at runtime
+docs/
+*.md
+!README.md

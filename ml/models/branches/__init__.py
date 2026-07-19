@@ -1,8 +1,8 @@
 """Feature-extraction branches for the SEETHRU detector."""
 
-from .spatial_branch import SpatialBranch
 from .frequency_branch import FrequencyBranch, visualize_spectrum
-from .temporal_branch import TemporalBranch, TemporalAttention
+from .spatial_branch import SpatialBranch
+from .temporal_branch import TemporalAttention, TemporalBranch
 
 __all__ = [
     "SpatialBranch",

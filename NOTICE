@@ -1,0 +1,92 @@
+SEETHRU -- Explainable Multi-Domain Deepfake Detection System
+Copyright 2026 The SEETHRU Authors
+
+This product includes software developed by the SEETHRU Authors, licensed under
+the Apache License, Version 2.0. See LICENSE.
+
+==============================================================================
+DATA AND MODEL WEIGHTS ARE NOT COVERED BY THE APACHE LICENSE
+==============================================================================
+
+This is the "EULA firewall". It exists because the boundary between what we may
+share and what we may not is easy to cross by accident -- one `docker push` of an
+image with weights baked in is a redistribution of restricted derived work.
+
+------------------------------------------------------------------------------
+1. Datasets -- never in this repository
+------------------------------------------------------------------------------
+
+SEETHRU trains and evaluates on datasets obtained under separate, signed,
+research-only agreements:
+
+  * FaceForensics++ (Roessler et al., ICCV 2019)
+    Technical University of Munich.
+    Access: https://github.com/ondyari/FaceForensics
+    Terms: research use only; redistribution prohibited.
+
+  * Celeb-DF v2 (Li et al., CVPR 2020)
+    University at Albany, SUNY.
+    Access: https://github.com/yuezunli/celeb-deepfakeforensics
+    Terms: research use only; redistribution prohibited.
+
+  * DFDC (Dolhansky et al., 2020) -- optional, evaluation only.
+    Terms: per the DFDC dataset licence.
+
+Consequences, which are binding, not advisory:
+
+  * No dataset video, frame, or face crop may be committed to this repository.
+    `data/` is gitignored and `.dockerignore` excludes it from all images.
+  * Anyone reproducing this work must obtain the data themselves, under their
+    own agreement. We provide no copies, mirrors, or links to copies.
+  * Each dataset must be cited in any resulting publication. See the papers
+    listed above.
+
+------------------------------------------------------------------------------
+2. Model weights -- derivative of restricted data
+------------------------------------------------------------------------------
+
+Weights trained on the datasets above are a derivative work of EULA-restricted
+data and inherit those restrictions. Therefore:
+
+  * Trained weights are NOT licensed under Apache-2.0.
+  * Trained weights are NOT committed to this repository (`*.pt`, `*.pth`,
+    `*.onnx`, `*.ckpt`, `*.safetensors` are gitignored and dockerignored).
+  * Trained weights are NOT baked into any public container image. They are
+    fetched at runtime from a gated store. See BUILD_PLAN T81.
+  * Any release of weights must carry a research-only term, a NOTICE of dataset
+    provenance, and a model card. See BUILD_PLAN T84.
+
+If you are unsure whether an artifact may be shared: it may not. Ask first.
+
+------------------------------------------------------------------------------
+3. Third-party components
+------------------------------------------------------------------------------
+
+SEETHRU depends on third-party open-source packages, each under its own licence.
+Notable ones whose terms are not Apache-2.0:
+
+  * PyTorch, torchvision          -- BSD-3-Clause
+  * OpenCV (opencv-python-headless) -- Apache-2.0
+  * albumentations                -- MIT
+  * retina-face                   -- MIT
+  * TensorFlow / tf-keras         -- Apache-2.0
+  * FastAPI, Starlette, uvicorn   -- MIT / BSD-3-Clause
+  * scikit-learn, scipy, numpy    -- BSD-3-Clause
+  * matplotlib                    -- PSF-based (matplotlib licence)
+
+Pretrained ImageNet weights for EfficientNet-B3 are obtained via torchvision and
+are governed by torchvision's terms. Unlike the deepfake datasets above, these
+carry no research-only restriction.
+
+See requirements.txt for the authoritative dependency list.
+
+------------------------------------------------------------------------------
+4. Intended use
+------------------------------------------------------------------------------
+
+SEETHRU is a research and educational system. It is NOT validated for forensic,
+legal, journalistic, or evidentiary use, and its output must not be presented as
+proof that media is authentic or manipulated. Deepfake detectors trained on
+FaceForensics++ are known to degrade substantially on unseen manipulation
+methods, compression levels, and populations. See MODEL_CARD.md (BUILD_PLAN T84)
+for measured limitations.

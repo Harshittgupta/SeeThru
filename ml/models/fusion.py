@@ -14,8 +14,6 @@ zeros, keeping the fused input fixed at 2176 dims.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
@@ -26,22 +24,57 @@ FUSED_INPUT_DIM = SPATIAL_DIM + FREQUENCY_DIM + TEMPORAL_DIM  # 2176
 FUSED_OUTPUT_DIM = 256
 
 
-def _build_fusion_mlp(input_dim: int = FUSED_INPUT_DIM) -> nn.Sequential:
-    """MLP [input -> 512 -> 256] with BatchNorm + ReLU + Dropout(0.4) per layer."""
+HIDDEN_DIM = 512
+DEFAULT_DROPOUT = 0.4
+
+
+def _build_fusion_mlp(
+    input_dim: int = FUSED_INPUT_DIM, dropout: float = DEFAULT_DROPOUT
+) -> nn.Sequential:
+    """MLP [input -> 512 -> 256] with LayerNorm + ReLU + Dropout per layer.
+
+    **LayerNorm, not BatchNorm1d** (BUILD_PLAN T21). Two independent reasons, and
+    the second is the one that actually matters:
+
+    1. BatchNorm1d *raises* on a batch of 1 in training mode::
+
+           ValueError: Expected more than 1 value per channel when training,
+           got input size torch.Size([1, 512])
+
+       DataLoader defaults to ``drop_last=False``, so a trailing 1-sample batch is
+       inevitable — meaning this killed a run at a random epoch boundary, hours in.
+       ``drop_last=True`` papers over it.
+
+    2. It cannot be papered over. At the spec's batch size of 8–16, BatchNorm's
+       statistics are computed over 8–16 samples: that is noise, not a statistic.
+       **Gradient accumulation does not fix this** — BN normalizes per *micro*-batch,
+       so accumulating 2x8 still estimates mean/var from 8 samples. The only real
+       fixes are a much larger batch (we cannot; the video model already needs
+       ~19 GB at B=8) or a batch-independent norm.
+
+    LayerNorm normalizes across features *within* each sample, so it is batch-size
+    independent, drop-in for ``(B, C)`` input, needs no running statistics (one less
+    thing to get wrong in a checkpoint), and behaves identically in train and eval.
+
+    Bonus, relevant to the two-stage schedule of T33: the stage1->stage2 switch
+    rescales the (spatial, frequency) block by a per-sample factor of ~0.41-0.89.
+    LayerNorm after the first Linear renormalizes per sample, absorbing much of
+    that shift for free.
+    """
     return nn.Sequential(
-        nn.Linear(input_dim, 512),
-        nn.BatchNorm1d(512),
+        nn.Linear(input_dim, HIDDEN_DIM),
+        nn.LayerNorm(HIDDEN_DIM),
         nn.ReLU(inplace=True),
-        nn.Dropout(0.4),
-        nn.Linear(512, FUSED_OUTPUT_DIM),
-        nn.BatchNorm1d(FUSED_OUTPUT_DIM),
+        nn.Dropout(dropout),
+        nn.Linear(HIDDEN_DIM, FUSED_OUTPUT_DIM),
+        nn.LayerNorm(FUSED_OUTPUT_DIM),
         nn.ReLU(inplace=True),
-        nn.Dropout(0.4),
+        nn.Dropout(dropout),
     )
 
 
 def _ensure_temporal(
-    temporal: Optional[torch.Tensor], reference: torch.Tensor
+    temporal: torch.Tensor | None, reference: torch.Tensor
 ) -> torch.Tensor:
     """Return temporal features, or a matching zero tensor when absent."""
     if temporal is not None:
@@ -50,19 +83,28 @@ def _ensure_temporal(
 
 
 class FeatureFusion(nn.Module):
-    """Concatenate branch features and fuse them through an MLP → ``(B, 256)``."""
+    """Concatenate branch features and fuse them through an MLP → ``(B, 256)``.
+
+    This is SEETHRU's fusion mode — see docs/adr/0001-fusion-mode.md. Branch
+    attribution is obtained by ablation over the fused vector (T51), not from
+    learned gates, so producing no branch weights here costs nothing.
+
+    Args:
+        dropout: Dropout inside the fusion MLP. Previously hardcoded to 0.4,
+            which made the spec's "dropout 0.3-0.5" unreachable from config (T22).
+    """
 
     out_features: int = FUSED_OUTPUT_DIM
 
-    def __init__(self) -> None:
+    def __init__(self, dropout: float = DEFAULT_DROPOUT) -> None:
         super().__init__()
-        self.mlp = _build_fusion_mlp(FUSED_INPUT_DIM)
+        self.mlp = _build_fusion_mlp(FUSED_INPUT_DIM, dropout=dropout)
 
     def forward(
         self,
         spatial: torch.Tensor,
         frequency: torch.Tensor,
-        temporal: Optional[torch.Tensor] = None,
+        temporal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         temporal = _ensure_temporal(temporal, spatial)
         fused = torch.cat([spatial, frequency, temporal], dim=1)  # (B, 2176)
@@ -76,23 +118,36 @@ class AttentionFusion(nn.Module):
     three branches yields per-sample weights that scale each branch before
     concatenation. This lets the network rely more on, say, the frequency branch
     for one sample and the temporal branch for another.
+
+    NOT SEETHRU's default — see docs/adr/0001-fusion-mode.md. Kept, tested, and
+    one constructor argument away, because the ADR has a concrete revisit
+    condition: if cross-dataset AUC lands near 0.65 *and* the frequency branch
+    collapses under c40 compression, per-sample branch gating is exactly the
+    remedy, and this is how we would A/B it.
+
+    Known behaviour if you do use it: with no temporal features, ``score_temporal``
+    receives **exactly zero gradient** (measured: grad norm 0.0), so an
+    image-stage checkpoint carries it at random initialisation.
+
+    Args:
+        dropout: Dropout inside the fusion MLP (T22).
     """
 
     out_features: int = FUSED_OUTPUT_DIM
 
-    def __init__(self) -> None:
+    def __init__(self, dropout: float = DEFAULT_DROPOUT) -> None:
         super().__init__()
         # Per-branch scoring heads (feature vector -> scalar relevance).
         self.score_spatial = nn.Linear(SPATIAL_DIM, 1)
         self.score_frequency = nn.Linear(FREQUENCY_DIM, 1)
         self.score_temporal = nn.Linear(TEMPORAL_DIM, 1)
-        self.mlp = _build_fusion_mlp(FUSED_INPUT_DIM)
+        self.mlp = _build_fusion_mlp(FUSED_INPUT_DIM, dropout=dropout)
 
     def forward(
         self,
         spatial: torch.Tensor,
         frequency: torch.Tensor,
-        temporal: Optional[torch.Tensor] = None,
+        temporal: torch.Tensor | None = None,
         return_weights: bool = False,
     ):
         has_temporal = temporal is not None

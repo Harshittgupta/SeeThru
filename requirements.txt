@@ -1,22 +1,66 @@
 # SEETHRU - Python dependencies
+#
+# Python 3.11 is required. The pinned stack below (albumentations 1.4.3,
+# retina-face, tf-keras) predates 3.12/3.13, and TensorFlow is the least
+# forgiving dependency in the tree. See docs/BUILD_PLAN.md T1.
+#
+# GPU note: on Windows, PyPI's torch wheels are CPU-only -- which is exactly what
+# we want for local development, since the training GPU isn't available yet.
+# On the training server, install the CUDA build instead (BUILD_PLAN T72):
+#
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# and verify torch.cuda.is_available() is True *before* starting a run.
 
-# Deep learning
-torch
-torchvision
+# --- Deep learning ---
+# Pinned WITHOUT a local version suffix (no "+cpu" / "+cu124") on purpose: the
+# same pin then resolves to 2.13.0+cpu from PyPI here, and to 2.13.0+cu124 from
+# the CUDA index on the training server. One requirements.txt, both machines.
+torch==2.13.0
+torchvision==0.28.0
+# TODO(T47): drop grad-cam. We hand-roll GradCAM instead: the library reads a 5D
+# (B,T,C,H,W) input as a 3D conv volume, and assumes activation-batch equals
+# input-batch, which VideoClassifier's (B,T,...)->(B*T,...) flatten violates.
 grad-cam
 
-# Web / API
+# --- Web / API ---
 fastapi
-uvicorn
+uvicorn[standard]
+# REQUIRED: FastAPI's UploadFile raises at request time without this, so every
+# upload endpoint 500s. Not optional despite looking like one.
+python-multipart
+pydantic-settings   # env-var config via BaseSettings (T54)
+filetype            # magic-byte upload validation -- extension is not evidence (T55)
+slowapi             # rate limiting (T55)
+prometheus-client   # /metrics (T54)
 
-# Computer vision
-opencv-python
+# --- Computer vision ---
+# headless ONLY. Never add opencv-python alongside it: both ship the same `cv2`
+# package and silently clobber each other (last writer wins).
+opencv-python-headless
 pillow
+# LOAD-BEARING PIN. ml/preprocessing/augmentation.py uses var_limit=,
+# quality_lower= and quality_upper=, all renamed or removed in >=1.4.14
+# (std_range, quality_range). Bumping this silently breaks training
+# augmentation. Guarded by the canary in tests/unit/test_transforms.py (T4/T14).
 albumentations==1.4.3
 retina-face
 tf-keras  # Keras-2 shim required by retina-face on TensorFlow 2.16+
 
-# Utilities
-numpy
+# --- Numerics / training ---
+# Deliberate: TensorFlow/retina-face are the numpy-2 laggards, and one ABI world
+# beats two. Revisit when RetinaFace is replaced by SCRFD/onnxruntime (T45).
+numpy<2
 scipy
-matplotlib==3.8.0
+scikit-learn  # AUC / AP / EER -- without this we cannot compute a single metric
+pyyaml        # ml/config.py YAML overlay (T25)
+tqdm
+tensorboard   # experiment tracking (T29)
+matplotlib    # explainability rendering (T46) + visualize_spectrum
+
+# --- Dev / test ---
+pytest
+pytest-cov
+pytest-asyncio
+httpx  # FastAPI TestClient (T59)
+ruff
